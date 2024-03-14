@@ -1,0 +1,531 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+Import gene count matrix from featureCounts output and rename colnames to more convenient names.
+```{r}
+setwd("C:/Users/denni/OneDrive/Desktop/Bioinformatics Work/p53BB_OPCs_RNAseq/")
+
+counts <- read.table("featureCounts/counts.txt", header = TRUE, skip = 1, row.names = "Geneid")
+
+counts <- counts[rowSums(counts[,6:13]) >= 10,]
+colnames(counts) <- c("Chr", "Start", "End", "Strand", "Length", "p53n_1", "p53n_2", "p53n_3", "BB-p53n_1", "BB-p53n_2", "BB-p53n_3", "BB-p53n-EZH2i_1", "BB-p53n-EZH2i_2", "BB-p53n-EZH2i_3")
+
+```
+
+DiffExp of BB-p53n vs p53 OPC by Limma
+```{r}
+library(edgeR)
+d0 <- DGEList(counts[,6:14])
+d0 <- calcNormFactors(d0)
+d0
+cutoff <- 1
+drop <- which(apply(cpm(d0), 1, max) < cutoff)
+d <- d0[-drop,]
+dim(d)
+group <- c(rep("P53null", 3), rep("P53null.BB", 3), rep("P53null.BB.EZH2i", 3))
+factor(group)
+plotMDS(d, col = as.numeric(group))
+
+
+mm <- model.matrix(~0+group)
+y <- voom(d, mm, plot = T)
+
+fit <- lmFit(y, mm)
+head(coef(fit))
+
+contr <- makeContrasts(groupP53null.BB - groupP53null, levels = colnames(coef(fit)))
+contr
+
+tmp <- contrasts.fit(fit, contr)
+tmp <- eBayes(tmp)
+
+diff.table <- topTable(tmp, sort.by = "P", n = Inf)
+diff.table$ENSEMBL <- rownames(diff.table)
+
+library(clusterProfiler)
+library(org.Mm.eg.db)
+symbols <- bitr(rownames(diff.table), OrgDb = org.Mm.eg.db, fromType = "ENSEMBL", toType = c("SYMBOL", "ENTREZID"), drop = FALSE)
+library(dplyr)
+diff.table <- left_join(diff.table, symbols, by = "ENSEMBL")
+
+#write.csv(diff.table, file = "diffExp_limma.csv")
+```
+
+DiffExp of BB-p53n EZH2i vs BB-p53n DMSO by Limma
+```{r}
+library(edgeR)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+
+d0 <- DGEList(counts[,6:14])
+d0 <- calcNormFactors(d0)
+d0
+cutoff <- 1
+drop <- which(apply(cpm(d0), 1, max) < cutoff)
+d <- d0[-drop,]
+dim(d)
+group <- c(rep("P53null", 3), rep("P53null.BB", 3), rep("P53null.BB.EZH2i", 3))
+factor(group)
+plotMDS(d, col = as.numeric(group))
+
+
+mm <- model.matrix(~0+group)
+y <- voom(d, mm, plot = T)
+
+fit <- lmFit(y, mm)
+head(coef(fit))
+
+contr <- makeContrasts(groupP53null.BB.EZH2i - groupP53null.BB, levels = colnames(coef(fit)))
+contr
+
+tmp <- contrasts.fit(fit, contr)
+tmp <- eBayes(tmp)
+
+diff.table.EZH2i <- topTable(tmp, sort.by = "P", n = Inf)
+diff.table.EZH2i$ENSEMBL <- rownames(diff.table)
+
+symbols <- bitr(rownames(diff.table.EZH2i), OrgDb = org.Mm.eg.db, fromType = "ENSEMBL", toType = c("SYMBOL", "ENTREZID"), drop = FALSE)
+library(dplyr)
+diff.table.EZH2i <- left_join(diff.table.EZH2i, symbols, by = "ENSEMBL")
+
+#write.csv(diff.table, file = "diffExp_EZH2i_limma.csv")
+```
+
+
+
+GSEA
+prepare gene lists for GSEA analysis
+p.adj <= 0.01
+```{r}
+diffExp_limma <- read.csv("diffExp_limma.csv")
+diffExp_EZH2i_limma <- read.csv("diffExp_EZH2i_limma.csv")
+
+library(tidyverse)
+
+colnames(diffExp_EZH2i_limma)
+diffExp_limma_filtered <- dplyr::filter(diffExp_limma, adj.P.Val <= 0.01)
+diffExp_limma_filtered <- drop_na(diffExp_limma_filtered)
+diffExp_EZH2i_limma_filtered <- dplyr::filter(diffExp_EZH2i_limma, adj.P.Val <= 0.01)
+diffExp_EZH2i_limma_filtered <- drop_na(diffExp_EZH2i_limma_filtered)
+
+geneList_BBvsCTRL <- diffExp_limma_filtered[order(diffExp_limma_filtered$logFC, decreasing = TRUE), ]$logFC
+names(geneList_BBvsCTRL) <- diffExp_limma_filtered[order(diffExp_limma_filtered$logFC, decreasing = TRUE), ]$ENTREZID
+
+
+geneList_EZH2ivsBB <- diffExp_EZH2i_limma_filtered[order(diffExp_EZH2i_limma_filtered$logFC, decreasing = TRUE), ]$logFC
+names(geneList_EZH2ivsBB) <- diffExp_EZH2i_limma_filtered[order(diffExp_EZH2i_limma_filtered$logFC, decreasing = TRUE), ]$ENTREZID
+```
+
+
+GSEA
+run gsea on GO database
+```{r}
+library(clusterProfiler)
+library(org.Mm.eg.db)
+
+gsea_BBvsCTRL <- gseGO(geneList = geneList_BBvsCTRL,
+                       ont = "ALL",
+                       OrgDb = org.Mm.eg.db,
+                       keyType = "ENTREZID",
+                       minGSSize = 10,
+                       maxGSSize = 500,
+                       pvalueCutoff = 0.9)
+gsea_BBvsCTRL <- setReadable(gsea_BBvsCTRL, OrgDb = org.Mm.eg.db, keyType = "ENTREZID")
+
+gsea_EZH2ivsBB <- gseGO(geneList = geneList_EZH2ivsBB,
+                       ont = "ALL",
+                       OrgDb = org.Mm.eg.db,
+                       keyType = "ENTREZID",
+                       minGSSize = 10,
+                       maxGSSize = 500,
+                       pvalueCutoff = 1.0)
+gsea_EZH2ivsBB <- setReadable(gsea_EZH2ivsBB, OrgDb = org.Mm.eg.db, keyType = "ENTREZID")
+
+View(as.data.frame(gsea_BBvsCTRL))
+View(as.data.frame(gsea_EZH2ivsBB))
+
+#write.csv(as.data.frame(gsea_BBvsCTRL), file = "gsea_BBp53nVSp53n_supp_table_2_v2.csv")
+#write.csv(as.data.frame(gsea_EZH2ivsBB), file = "gsea_BBp53n_EZH2ivsDMSO_supp_table_2_v2.csv")
+```
+
+run GSEA on G1-S and G2-M gene sets from Tirosh et al.
+```{r}
+G1S_geneset <- read.table("Geneset/G1S.txt", header = TRUE)
+colnames(G1S_geneset) <- "SYMBOL"
+G2M_geneset <- read.table("Geneset/G2M.txt", header = TRUE)
+colnames(G2M_geneset) <- "SYMBOL"
+
+temp_Entrez <- bitr(G1S_geneset$SYMBOL, fromType = "SYMBOL", toType = c("SYMBOL", "ENTREZID"), drop = FALSE, OrgDb = org.Mm.eg.db)
+G1S_geneset <- left_join(G1S_geneset, temp_Entrez, by = "SYMBOL", keep = FALSE)
+
+temp_Entrez <- bitr(G2M_geneset$SYMBOL, fromType = "SYMBOL", toType = c("SYMBOL", "ENTREZID"), drop = FALSE, OrgDb = org.Mm.eg.db)
+G2M_geneset <- left_join(G2M_geneset, temp_Entrez, by = "SYMBOL", keep = FALSE)
+
+cellcycle_df <- data.frame(cell_Cycle = c(rep("G1-S", length(G1S_geneset$ENTREZID)), rep("G2-M", length(G2M_geneset$ENTREZID))), ENTREZ = c(G1S_geneset$ENTREZID, G2M_geneset$ENTREZID))
+
+cellCycle_BBvsCTRL <- GSEA(geneList = geneList_BBvsCTRL,
+                  TERM2GENE = cellcycle_df,
+                  pvalueCutoff = 0.1)
+cellCycle_BBvsCTRL <- setReadable(cellCycle_BBvsCTRL, OrgDb = org.Mm.eg.db, keyType = "ENTREZID")
+as.data.frame(cellCycle_BBvsCTRL)
+
+cellCycle_EZH2ivsBB <- GSEA(geneList = geneList_EZH2ivsBB,
+                  TERM2GENE = cellcycle_df,
+                  pvalueCutoff = 1)
+cellCycle_EZH2ivsBB <- setReadable(cellCycle_EZH2ivsBB, OrgDb = org.Mm.eg.db, keyType = "ENTREZID")
+```
+
+Plot GSEA plots with enrichplot
+```{r}
+library(enrichplot)
+
+#BBp53nvsp53n GO terms with DNA replication and Cell Cycle
+gseaplot2(gsea_BBvsCTRL, geneSetID = c("GO:0051301", "GO:0006260", "GO:0044770", "GO:0000075"), title = "BB-p53n vs p53n", base_size = 20, pvalue_table = FALSE)
+#EZH2ivsDMSO BB-p53n GO terms with DNA replication and Cell Cycle
+gseaplot2(gsea_EZH2ivsBB, geneSetID = c("GO:0051301", "GO:0006260", "GO:0044770", "GO:0000075"), title = "EZH2i vs Ctrl BB-p53n", base_size = 20, pvalue_table = FALSE)
+
+#BBp53nvsp53n OPC Differentiation
+gseaplot2(gsea_BBvsCTRL, geneSetID = c("GO:0048709"), title = "BB-p53n vs p53n: OPC differentiation", base_size = 20, pvalue_table = FALSE)
+#EZH2ivsDMSO BB-p53n OPC Differentiation
+gseaplot2(gsea_EZH2ivsBB, geneSetID = c("GO:0048709"), title = "EZH2i vs CTRL BB-p53n: OPC differentiation", base_size = 20)
+
+#BBp53nvsp53n Cell Cycle Control Tirosh et al.
+gseaplot2(cellCycle_BBvsCTRL, geneSetID = c("G1-S", "G2-M"),title = "BB-p53n vs p53n: Cell Cycle Control", pvalue_table = FALSE, base_size = 20)
+#EZH2ivsDMSO BB-p53n Cell Cycle Control Tirosh et al.
+gseaplot2(cellCycle_EZH2ivsBB, geneSetID = c("G1-S", "G2-M"), pvalue_table = FALSE, title = "EZH2i vs CTRL BB-p53n: Cell Cycle Control", base_size = 20)
+
+
+```
+
+
+Downregulated ontologies in BBvsCtrl GSEA
+GO:0006631 - fatty acid metaebolic process
+GO:0044255 - cellular lipid process(remove)
+GO:0022010 - central nervous system myelination 
+GO:0032291 - axon ensheathment
+GO:0048709 - Oligodendrocyte differentiation
+```{r}
+gseaplot2(gsea_BBvsCTRL, geneSetID = c("GO:0048709", "GO:0022010", "GO:0006631"), title = "BB-p53n vs p53n: Myelination", base_size = 20, pvalue_table = FALSE)
+```
+
+
+Downregulation of same ontologies in EZH2ivsDMSO BBp53n GSEA
+```{r}
+gseaplot2(gsea_EZH2ivsBB, geneSetID = c("GO:0048709", "GO:0022010", "GO:0006631"), title = "EZH2i vs CTRL BB-p53n: Myelination", base_size = 20, pvalue_table = TRUE)
+```
+
+Upregulation in EZH2ivsBB GSEA
+```{r}
+gseaplot2(cellCycle_EZH2ivsBB, geneSetID = c("G1-S", "G2-M"),title = "EZH2i vs CTRL BB-p53n: Cell Cycle Control", pvalue_table = TRUE, base_size = 20)
+```
+
+Dotplot for BBp53nvsp53n OPC for highly significantly enriched ontologies
+```{r}
+desc <- gsea_BBvsCTRL@result[c("GO:0006261",
+                       "GO:0006260",
+                       "GO:0007059",
+                       "GO:1903047",
+                       "GO:0000075",
+                       "GO:0035082",
+                        "GO:0071827",
+                        "GO:0033559",
+                        "GO:0060285",
+                        "GO:0071825"), ]$Description
+#mutate(gsea_BBvsCTRL, qscore = -log(p.adjust, base=10)) %>% 
+#    barplot(x="qscore")
+library(DOSE)
+library(enrichplot)
+dotplot(gsea_BBvsCTRL, x = "NES", showCategory = desc) +
+  theme(panel.background = element_blank(),
+        axis.line = element_line(colour = "black", size = 1.0),
+        axis.ticks = element_line(color = "black", size = 1.5),
+        text = element_text(size = 25),
+        axis.text.y = element_text(size = 15))
+```
+
+Volcano Plots
+```{r}
+#import differential expression data BBp53nvsp53n
+diffExp <- read.csv("diffExp_limma.csv", header = TRUE, row.names = "X")
+
+diffExp$diffexpressed <- "NS"
+diffExp$diffexpressed[diffExp$logFC > 1.0 & diffExp$adj.P.Val <= 0.01] <- "UPREGULATED"
+diffExp$diffexpressed[diffExp$logFC < -1.0 & diffExp$adj.P.Val <= 0.01] <- "DOWNREGULATED"
+
+#import differential expression data EZH2ivsDMSO
+diffExp_EZH2i <- read.csv("diffExp_EZH2i_limma.csv", header = TRUE, row.names = "X")
+
+diffExp_EZH2i$diffexpressed <- "NS"
+diffExp_EZH2i$diffexpressed[diffExp_EZH2i$logFC > 1.0 & diffExp_EZH2i$adj.P.Val <= 0.01] <- "UPREGULATED"
+diffExp_EZH2i$diffexpressed[diffExp_EZH2i$logFC < -1.0 & diffExp_EZH2i$adj.P.Val <= 0.01] <- "DOWNREGULATED"
+```
+
+Volcano Plot for Cell cycle controllers in BBp53nvsp53n
+```{r}
+highlight_label_df <- diffExp %>%
+    filter(SYMBOL %in% c("Ccne2", "Cdc45", "Cdc6", "Cdca7", "Mcm2", "Mcm7", "Pol1a"))
+
+ggplot(data = diffExp, aes(x = logFC, y = -log10(adj.P.Val), col = diffexpressed)) + 
+  scale_colour_manual(values = c("cadetblue2", "grey", "red")) +
+  geom_point(size = 3) +
+  geom_point(data = highlight_label_df, aes(x = logFC, y = -log10(adj.P.Val)), size = 5, color = "black") +
+  geom_label_repel(data = highlight_label_df, aes(label = SYMBOL), color = "black", box.padding = 1, 
+                  point.padding = 0.5, segment.color = 'black', size = 5) +
+  geom_vline(xintercept=c(-1, 1), col="black", alpha = 0.5, size = 1, linetype = "twodash") +
+  geom_hline(yintercept = -log10(0.01), col = "black", alpha = 0.5, size = 1, linetype = "twodash") +
+  #xlim(c(-4, 4)) +
+  #ylim(c(0,10)) + 
+  theme(legend.position = "none", 
+        text=element_text(size=20), 
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line = element_line(color = "black"))
+```
+
+Volcano Plot for Cell cycle controllers in EZH2ivsDMSO BBp53n
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+
+diffExp_EZH2i <- read.csv("diffExp_EZH2i_limma.csv", header = TRUE, row.names = "X")
+
+diffExp_EZH2i$diffexpressed <- "NS"
+diffExp_EZH2i$diffexpressed[diffExp_EZH2i$logFC > 1.0 & diffExp_EZH2i$adj.P.Val <= 0.01] <- "UPREGULATED"
+diffExp_EZH2i$diffexpressed[diffExp_EZH2i$logFC < -1.0 & diffExp_EZH2i$adj.P.Val <= 0.01] <- "DOWNREGULATED"
+
+nrow(dplyr::filter(diffExp_EZH2i, diffexpressed == "UPREGULATED"))
+nrow(dplyr::filter(diffExp_EZH2i, diffexpressed == "DOWNREGULATED"))
+
+G1S <- read.delim("Geneset/G1S.txt", header = TRUE)
+
+highlight_df <- diffExp_EZH2i %>%
+    filter(SYMBOL %in% G1S$G1.S)
+highlight_label_df <- diffExp_EZH2i %>%
+    filter(SYMBOL %in% c("Pol1a", "Ccne2", "Cdc45", "Cdc6", "Cdca7", "Mcm2", "Mcm7", "Atad2"))
+#%in% G1S$G1.S & diffexpressed == "DOWNREGULATED" Atad2, Blm, Pol1a, Ccne2
+#c("Cnp", "Mag", "Myrf", "Mbp", "Sox8")
+ggplot(data = diffExp_EZH2i, aes(x = logFC, y = -log10(adj.P.Val), col = diffexpressed)) + 
+  scale_colour_manual(values = c("cadetblue2", "grey", "red")) +
+  geom_point(size = 3) +
+  geom_point(data = highlight_df, aes(x = logFC, y = -log10(adj.P.Val)), size = 5, color = "black") +
+  geom_label_repel(data = highlight_label_df, aes(label = SYMBOL), color = "black", box.padding = 1, 
+                  point.padding = 0.5, segment.color = 'black', size = 5) +
+  geom_vline(xintercept=c(-1, 1), col="black", alpha = 0.5, size = 1, linetype = "twodash") +
+  geom_hline(yintercept = -log10(0.01), col = "black", alpha = 0.5, size = 1, linetype = "twodash") +
+  #xlim(c(-4, 4)) +
+  #ylim(c(0,10)) + 
+  theme(legend.position = "none", 
+        text=element_text(size=20), 
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line = element_line(color = "black")) +
+  ggtitle("EZH2i treated vs untreated BB-p53n OPC")
+
+```
+
+Volcano Plot for OPC differentiation genes in BBp53nvsp53n
+```{r}
+OPC_diff <- read.delim("Geneset/OPC_differentiation.txt", header = TRUE)
+
+highlight_df <- diffExp %>%
+    filter(SYMBOL %in% OPC_diff$Symbol)
+highlight_label_df <- diffExp %>%
+    filter(SYMBOL %in% c("Cnp", "Mag", "Myrf", "Mbp", "Sox8", "Erbb2", "Prmt5"))
+
+ggplot(data = diffExp, aes(x = logFC, y = -log10(adj.P.Val), col = diffexpressed)) + 
+  scale_colour_manual(values = c("cadetblue2", "grey", "red")) +
+  geom_point(size = 3) +
+  geom_point(data = highlight_df, aes(x = logFC, y = -log10(adj.P.Val)), size = 4, color = "black") +
+  geom_label_repel(data = highlight_label_df, aes(label = SYMBOL), color = "black", box.padding = 1, 
+                  point.padding = 0.5, segment.color = 'black', size = 5) +
+  geom_vline(xintercept=c(-1, 1), col="black", alpha = 0.5, size = 1, linetype = "twodash") +
+  geom_hline(yintercept = -log10(0.01), col = "black", alpha = 0.5, size = 1, linetype = "twodash") +
+  #xlim(c(-4, 4)) +
+  #ylim(c(0,10)) + 
+  theme(legend.position = "none", 
+        text=element_text(size=20), 
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line = element_line(color = "black")) +
+  ggtitle("BB-p53n vs p53n OPC")
+```
+
+Volcano Plot for OPC differentiation genes in EZH2ivsDMSO
+```{r}
+highlight_df <- diffExp_EZH2i %>%
+    filter(SYMBOL %in% OPC_diff$Symbol)
+highlight_label_df <- diffExp_EZH2i %>%
+    filter(SYMBOL %in% c("Cnp", "Mag", "Myrf", "Mbp", "Sox8", "Erbb2", "Prmt5"))
+
+ggplot(data = diffExp_EZH2i, aes(x = logFC, y = -log10(adj.P.Val), col = diffexpressed)) + 
+  scale_colour_manual(values = c("cadetblue2", "grey", "red")) +
+  geom_point(size = 3) +
+  geom_point(data = highlight_df, aes(x = logFC, y = -log10(adj.P.Val)), size = 4, color = "black") +
+  geom_label_repel(data = highlight_label_df, aes(label = SYMBOL), color = "black", box.padding = 1, 
+                  point.padding = 0.5, segment.color = 'black', size = 5) +
+  geom_vline(xintercept=c(-1, 1), col="black", alpha = 0.5, size = 1, linetype = "twodash") +
+  geom_hline(yintercept = -log10(0.01), col = "black", alpha = 0.5, size = 1, linetype = "twodash") +
+  #xlim(c(-4, 4)) +
+  #ylim(c(0,10)) + 
+  theme(legend.position = "none", 
+        text=element_text(size=20), 
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line = element_line(color = "black")) +
+  ggtitle("EZH2i treated vs untreated BB-p53n OPC")
+```
+
+Raw counts to TPM conversion
+```{r}
+counts_tpm <- counts
+
+for (x in 1:nrow(counts)) {
+  for(y in 6:ncol(counts)){
+    counts_tpm[x,y] <- counts[x,y]/counts$Length[x]
+  }
+}
+
+scaling_factor <- colSums(counts_tpm[,6:length(counts_tpm)])/1e6
+
+for (x in 1:nrow(counts_tpm)) {
+  for (y in 6:ncol(counts_tpm)) {
+    counts_tpm[x,y] <- counts_tpm[x,y]/scaling_factor[y-5]
+  }
+}
+
+counts_tpm <- counts_tpm[,-c(1:5)]
+
+```
+
+Calculate Z-scores
+```{r}
+counts_tpm_filtered <- counts_tpm[rowSums(counts_tpm) >= 100,]
+
+library(dplyr)
+
+z_table <- counts_tpm_filtered %>%
+  t() %>%
+  scale() %>%
+  t()
+
+library(tidyr)
+
+z_scores <- drop_na(as.data.frame(z_table))
+```
+
+Heatmap Full transcriptome
+```{r}
+library(pheatmap)
+pheatmap(z_scores, 
+         cluster_cols = FALSE,
+         cluster_rows = TRUE,
+         clustering_method = "average", 
+         show_rownames = FALSE, 
+         show_colnames = TRUE,
+         legend = TRUE,
+         annotation_legend = TRUE)
+```
+
+Heatmap filtered for selected clusters
+```{r}
+cluster_data <- read.csv("cluster_analysis_02132024/cluster_data.csv", row.names = "X")
+
+z_scores$ENSEMBL <- rownames(z_scores)
+
+z_scores_filtered <- drop_na(left_join(z_scores, cluster_data, by = "ENSEMBL"))
+
+rownames(z_scores_filtered) <- z_scores_filtered$SYMBOL
+
+z_scores_filtered <- z_scores_filtered[,1:9]
+
+library(pheatmap)
+
+my_sample_col <- data.frame(row.names = colnames(z_scores_filtered), Sample = c(rep("p53n", 3), rep("BB-p53n", 3), rep("BB-p53n-EZH2i", 3)))
+
+my_sample_col$Sample <- factor(my_sample_col$Sample, levels = c("p53n", "BB-p53n", "BB-p53n-EZH2i"))
+
+annotation_rows <- data.frame(cluster = as.character(cluster_data$cluster), row.names = cluster_data$SYMBOL)
+
+z_scores_filtered <- z_scores_filtered[rownames(annotation_rows), ]
+
+pheatmap(z_scores_filtered, 
+         annotation_col = my_sample_col, 
+         cluster_cols = FALSE, 
+         annotation_row = annotation_rows,
+         cluster_rows = FALSE,
+         clustering_method = "average", 
+         show_rownames = FALSE, 
+         show_colnames = FALSE,
+         legend = TRUE,
+         annotation_legend = FALSE)
+```
+
+
+Over represenatation analysis (GO database) of the 3 clusters from previous heatmap
+```{r}
+library(clusterProfiler)
+library(org.Mm.eg.db)
+
+gse_cluster_1 <- enrichGO(gene =  cluster_data[cluster_data$cluster == 1,]$ENTREZID,
+                        ont = "ALL",
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "ENTREZID",
+                        minGSSize = 10,
+                        maxGSSize = 500,
+                        pvalueCutoff = 0.05,
+                        readable = TRUE)
+
+
+gse_cluster_2 <- enrichGO(gene =  cluster_data[cluster_data$cluster == 2,]$ENTREZID,
+                        ont = "ALL",
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "ENTREZID",
+                        minGSSize = 10,
+                        maxGSSize = 500,
+                        pvalueCutoff = 0.05,
+                        readable = TRUE)
+
+gse_cluster_3 <- enrichGO(gene =  cluster_data[cluster_data$cluster == 3,]$ENTREZID,
+                        ont = "ALL",
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "ENTREZID",
+                        minGSSize = 10,
+                        maxGSSize = 500,
+                        pvalueCutoff = 0.05,
+                        readable = TRUE)
+
+cluster_3_cats <- gse_cluster_3@result[order(gse_cluster_3@result$Count, decreasing = TRUE),]$Description[1:10]
+cluster_3_cats
+View(as.data.frame(gse_cluster_1))
+View(as.data.frame(gse_cluster_2))
+View(as.data.frame(gse_cluster_3))
+
+library(enrichplot)
+library(ggplot2)
+
+d1 <- dotplot(gse_cluster_1) +
+  xlim(0.02,0.11) +
+  ggtitle("Cluster 1")
+d2 <- dotplot(gse_cluster_2)+
+  xlim(0.02,0.11) +
+  ggtitle("Cluster 2")
+d3 <- dotplot(gse_cluster_3,
+              showCategory = cluster_3_cats)+
+  xlim(0.02,0.11) +
+  ggtitle("Cluster 3")
+
+library(cowplot)
+
+plot_grid(d1,d2,d3, ncol = 1, align = "v")
+
+#write.csv(as.data.frame(gse_cluster_3), file = "cluster_analysis_02132024/gse_cluster_3.csv")
+```
+
+
+
+
